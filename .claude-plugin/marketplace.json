@@ -1,0 +1,12 @@
+{
+  "name": "claude-delegate",
+  "description": "A small delegation protocol and runner for Claude Code.",
+  "owner": { "name": "claude-delegate contributors" },
+  "plugins": [
+    {
+      "name": "claude-delegate",
+      "source": "./",
+      "description": "Delegate implementation while keeping Claude handoff turns small."
+    }
+  ]
+}

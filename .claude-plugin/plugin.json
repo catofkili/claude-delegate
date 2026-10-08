@@ -1,0 +1,7 @@
+{
+  "name": "claude-delegate",
+  "version": "0.1.0",
+  "description": "Claude supervises external agents with bounded handoff output.",
+  "author": { "name": "claude-delegate contributors" },
+  "license": "MIT"
+}

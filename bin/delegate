@@ -1,0 +1,280 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+    cat <<'HELP'
+Usage: delegate run <prompt.md> [--agent NAME] [--dir DIR] [--check CMD]
+                    [--max-summary N] [--timeout SEC]
+Agents: codex (default), claude-compat, custom. Summary limit: 4000 bytes.
+Timeout: positive integer seconds for the agent and check together.
+See README.md for environment variables and permissions.
+HELP
+}
+fail() { printf 'delegate: %s\n' "$*" >&2; exit 2; }
+
+if [[ ${1:-} == --help || ${1:-} == -h ]]; then usage; exit 0; fi
+[[ ${1:-} == run ]] || fail 'expected run; use --help for usage'
+shift
+run_started=$(python3 -c 'import time; print(time.monotonic())')
+[[ $# -gt 0 ]] || fail 'missing prompt file'
+prompt=$1
+shift
+agent=codex
+dir=.
+check=
+max_summary=4000
+timeout=0
+while [[ $# -gt 0 ]]; do
+    [[ $# -ge 2 ]] || fail "missing value for $1"
+    case $1 in
+        --agent) agent=$2 ;;
+        --dir) dir=$2 ;;
+        --check) check=$2 ;;
+        --max-summary) max_summary=$2 ;;
+        --timeout)
+            [[ $2 =~ ^[0-9]+$ && $2 =~ [1-9] ]] || fail 'timeout must be positive integer seconds'
+            timeout=$2 ;;
+        *) fail "unknown option: $1" ;;
+    esac
+    shift 2
+done
+[[ $max_summary =~ ^[0-9]+$ ]] || fail 'max-summary must be a nonnegative byte count'
+[[ -f $prompt && -r $prompt ]] || fail 'prompt must be a readable file'
+prompt=$(python3 -c 'import os,sys; print(os.path.abspath(sys.argv[1]))' "$prompt")
+dir=$(cd -- "$dir" && pwd -P) || fail 'target directory does not exist'
+in_git=false
+if [[ $(git -C "$dir" rev-parse --is-inside-work-tree 2>/dev/null || true) == true ]]; then
+    in_git=true
+    exclude=$(git -C "$dir" rev-parse --git-path info/exclude)
+    [[ $exclude == /* ]] || exclude="$dir/$exclude"
+    python3 - "$exclude" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.parent.mkdir(parents=True, exist_ok=True)
+text = path.read_text() if path.exists() else ''
+if '.delegate/' not in text.splitlines():
+    with path.open('a') as stream:
+        stream.write(('\n' if text and not text.endswith('\n') else '') + '.delegate/\n')
+PY
+fi
+mkdir -p "$dir/.delegate"
+run=$(mktemp -d "$dir/.delegate/$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")
+cp -- "$prompt" "$run/prompt.md"
+export DELEGATE_OUT="$run/out.md"
+: > "$DELEGATE_OUT"
+: > "$run/run.log"
+
+case $agent in
+    codex)
+        cmd=("${DELEGATE_CODEX_BIN:-codex}" exec -C "$dir" -s workspace-write -o "$DELEGATE_OUT")
+        [[ $in_git == true ]] || cmd+=(--skip-git-repo-check)
+        [[ -z ${DELEGATE_CODEX_MODEL:-} ]] || cmd+=(-m "$DELEGATE_CODEX_MODEL")
+        [[ -z ${DELEGATE_CODEX_EFFORT:-} ]] || cmd+=(-c "model_reasoning_effort=$DELEGATE_CODEX_EFFORT")
+        if [[ ${DELEGATE_CODEX_NETWORK:-0} == 1 ]]; then
+            cmd+=(-c sandbox_workspace_write.network_access=true)
+        else
+            cmd+=(-c sandbox_workspace_write.network_access=false)
+        fi
+        cmd+=(-) ;;
+    claude-compat)
+        [[ -n ${DELEGATE_COMPAT_BASE_URL:-} && -n ${DELEGATE_COMPAT_MODEL:-} ]] || fail 'set DELEGATE_COMPAT_BASE_URL and DELEGATE_COMPAT_MODEL'
+        token_env=${DELEGATE_COMPAT_TOKEN_ENV:-}
+        [[ $token_env =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]] || fail 'DELEGATE_COMPAT_TOKEN_ENV must name a token environment variable'
+        [[ -n ${!token_env:-} ]] || fail 'the named token variable is empty'
+        # Save before env -u, even when the source variable is ANTHROPIC_API_KEY.
+        export DELEGATE_COMPAT_SECRET="${!token_env}"
+        cmd=(env)
+        while IFS= read -r key; do cmd+=(-u "$key"); done < <(python3 - <<'PY'
+import os
+for key in os.environ:
+    if key.startswith('ANTHROPIC_') or key in {
+        'CLAUDECODE', 'CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR',
+        'CLAUDE_CODE_SUBAGENT_MODEL',
+        'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY',
+    }:
+        print(key)
+PY
+        )
+        cmd+=(bash -c '
+            export ANTHROPIC_BASE_URL="$DELEGATE_COMPAT_BASE_URL"
+            export ANTHROPIC_AUTH_TOKEN="$DELEGATE_COMPAT_SECRET"
+            export ANTHROPIC_MODEL="$DELEGATE_COMPAT_MODEL"
+            export ANTHROPIC_DEFAULT_OPUS_MODEL="$DELEGATE_COMPAT_MODEL"
+            export ANTHROPIC_DEFAULT_SONNET_MODEL="$DELEGATE_COMPAT_MODEL"
+            export ANTHROPIC_DEFAULT_HAIKU_MODEL="$DELEGATE_COMPAT_MODEL"
+            export ANTHROPIC_DEFAULT_FABLE_MODEL="$DELEGATE_COMPAT_MODEL"
+            unset DELEGATE_COMPAT_SECRET
+            exec claude -p --model "$DELEGATE_COMPAT_MODEL" --output-format json --permission-mode acceptEdits
+        ') ;;
+    custom)
+        [[ -n ${DELEGATE_CMD:-} ]] || fail 'set DELEGATE_CMD for custom'
+        cmd=(bash -c "$DELEGATE_CMD") ;;
+    *) fail "unknown agent: $agent" ;;
+esac
+
+exec python3 - "$dir" "$run" "$agent" "$check" "$max_summary" "$timeout" "$in_git" "$run_started" "${cmd[@]}" <<'PY'
+import collections
+import json
+import os
+from pathlib import Path
+import re
+import signal
+import subprocess
+import sys
+import time
+
+directory, run, agent, check, limit, timeout, in_git = sys.argv[1:8]
+run = Path(run)
+started = float(sys.argv[8])
+deadline = started + int(timeout) if int(timeout) else None
+log = (run / 'run.log').open('ab', buffering=0)
+
+def interrupt(signum, frame):
+    raise KeyboardInterrupt
+
+signal.signal(signal.SIGTERM, interrupt)
+
+def execute(command, output, source=None):
+    remaining = deadline - time.monotonic() if deadline else None
+    if remaining is not None and remaining <= 0:
+        output.write(b'delegate: timeout before command started\n')
+        return 124
+    try:
+        process = subprocess.Popen(command, cwd=directory, stdin=source or subprocess.DEVNULL,
+                                   stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+    except OSError as error:
+        output.write(f'delegate: {error}\n'.encode())
+        return 127
+    try:
+        status = process.wait(timeout=remaining)
+        return status if status >= 0 else 128 - status
+    except (subprocess.TimeoutExpired, KeyboardInterrupt) as error:
+        # Kill the group, including grandchildren that keep log files open.
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+        status = 124 if isinstance(error, subprocess.TimeoutExpired) else 130
+        output.write(f'delegate: command stopped (exit {status})\n'.encode())
+        return status
+
+# Codex account rotation: DELEGATE_CODEX_HOMES lists CODEX_HOME dirs, each logged in
+# separately. The state file is one line, "home=reset_epoch ...", recording only
+# exhausted accounts. Ready accounts go first in configured order, then exhausted
+# ones by soonest reset; on a usage-limit error the next account reruns the prompt.
+homes = os.environ.get('DELEGATE_CODEX_HOMES', '').split() if agent == 'codex' else []
+state = Path(os.environ.get('DELEGATE_CODEX_STATE') or Path.home() / '.delegate-codex-state')
+# Real wording seen 2026-10-08: "ERROR: You’ve hit your usage limit. ... try again at
+# Oct 9th, 2026 4:16 AM." The binary also has "reached your usage limit". Anchoring on
+# ERROR: skips the prompt that codex exec echoes into the log.
+LIMIT = re.compile(rb'^ERROR: .*your usage limit', re.M)
+
+def load_state():
+    try:
+        return {h: float(e) for h, e in (p.rsplit('=', 1) for p in state.read_text().split())}
+    except (OSError, ValueError):
+        return {}
+
+def reset_epoch(home):
+    # Codex logs rate_limits snapshots (with resets_at) into its rollout files. Pick
+    # the window with the highest used_percent: the error itself may come before a
+    # fresh snapshot, but the nearly-full window is the one that ran out.
+    for day in (0, 86400):
+        folder = Path(home, 'sessions', time.strftime('%Y/%m/%d', time.localtime(time.time() - day)))
+        for rollout in sorted(folder.glob('rollout-*.jsonl'), key=lambda p: p.stat().st_mtime, reverse=True):
+            for line in reversed(rollout.read_bytes().splitlines()):
+                if b'"rate_limits"' not in line:
+                    continue
+                try:
+                    limits = json.loads(line)['payload']['rate_limits']
+                    windows = [w for w in (limits.get('primary'), limits.get('secondary')) if w]
+                    return float(max(windows, key=lambda w: w['used_percent'])['resets_at'])
+                except (ValueError, KeyError, TypeError):
+                    continue
+    return time.time() + 3600  # ponytail: unknown format, assume an hour
+
+if homes:
+    exhausted = {h: e for h, e in load_state().items() if e > time.time()}
+    homes.sort(key=lambda h: exhausted.get(h, 0))
+for home in homes or [None]:
+    if home:
+        os.environ['CODEX_HOME'] = os.path.expanduser(home)
+    start = (run / 'run.log').stat().st_size
+    with (run / 'prompt.md').open('rb') as source:
+        agent_status = execute(sys.argv[9:], log, source)
+    if not home:
+        break
+    with (run / 'run.log').open('rb') as stream:
+        stream.seek(start)
+        if not LIMIT.search(stream.read()):
+            exhausted.pop(home, None)
+            break
+    exhausted[home] = reset_epoch(os.environ['CODEX_HOME'])
+    until = time.strftime('%m-%d %H:%M', time.localtime(exhausted[home]))
+    print(f'delegate: {home} out of quota until {until}', file=sys.stderr)
+if homes:
+    state.write_text(' '.join(f'{h}={int(e)}' for h, e in exhausted.items()) + '\n')
+os.environ.pop('DELEGATE_COMPAT_SECRET', None)
+out = run / 'out.md'
+if agent == 'claude-compat' and agent_status == 0:
+    result = None
+    with (run / 'run.log').open('rb') as stream:
+        for line in stream:
+            try:
+                record = json.loads(line)
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if isinstance(record, dict) and record.get('type') == 'result':
+                result = record
+    if result and isinstance(result.get('result'), str):
+        out.write_text(result['result'], encoding='utf-8')
+        if result.get('is_error'):
+            agent_status = 1
+    else:
+        agent_status = 1
+        log.write(b'delegate: no Claude JSON result found\n')
+if not out.is_file() or out.stat().st_size == 0:
+    agent_status = agent_status or 1
+    log.write(b'delegate: missing or empty final message\n')
+
+check_status = 0
+if check:
+    with (run / 'check.log').open('wb', buffering=0) as stream:
+        check_status = execute(['bash', '-c', check], stream)
+stdout = sys.stdout.buffer
+stdout.write(f'out.md (first {limit} bytes):\n'.encode())
+if out.is_file():
+    with out.open('rb') as stream:
+        stdout.write(stream.read(int(limit)))
+stdout.write(b'\ngit status --short (first 30 lines):\n')
+if in_git == 'true':
+    with (run / 'status.log').open('wb') as stream:
+        status = subprocess.run(['git', '-c', 'color.status=false', 'status', '--short'],
+                                cwd=directory, stdout=stream, stderr=log).returncode
+    if status:
+        agent_status = agent_status or status
+    with (run / 'status.log').open('rb') as stream:
+        for index, line in enumerate(stream):
+            if index == 30:
+                break
+            stdout.write(line)
+if check:
+    stdout.write(f'check exit code: {check_status}\n'.encode())
+    with (run / 'check.log').open('rb') as stream:
+        stdout.writelines(collections.deque(stream, maxlen=20))
+    stdout.write(b'\n')
+else:
+    stdout.write(b'check exit code: not run\n')
+stdout.write(f'elapsed: {time.monotonic() - started:.2f}s\n'.encode())
+stdout.flush()
+if agent_status:
+    print(f'delegate: agent/run exit {agent_status}; see .delegate/{run.name}/run.log', file=sys.stderr)
+sys.exit(agent_status or check_status)
+PY
