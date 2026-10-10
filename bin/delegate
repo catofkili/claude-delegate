@@ -115,6 +115,7 @@ esac
 
 exec python3 - "$dir" "$run" "$agent" "$check" "$max_summary" "$timeout" "$in_git" "$run_started" "${cmd[@]}" <<'PY'
 import collections
+import datetime
 import json
 import os
 from pathlib import Path
@@ -174,7 +175,33 @@ state = Path(os.environ.get('DELEGATE_CODEX_STATE') or Path.home() / '.delegate-
 # Real wording seen 2026-10-08: "ERROR: You’ve hit your usage limit. ... try again at
 # Oct 9th, 2026 4:16 AM." The binary also has "reached your usage limit". Anchoring on
 # ERROR: skips the prompt that codex exec echoes into the log.
-LIMIT = re.compile(rb'^ERROR: .*your usage limit', re.M)
+LIMIT = re.compile(rb'^ERROR: .*your usage limit.*$', re.M)
+# 2026-10-10: both accounts said "try again at 4:10 AM." (time only, no date), but the
+# newest rollout snapshot of ~/.codex still had resets_at 03:15, already stale. The
+# state file trusted 03:15, a job scheduled at 03:20 died in 37s and the night was
+# lost. So the error line is the authority; rollout snapshots are only a fallback.
+AGAIN = re.compile(r'try again at (.+?)\.?\s*$')
+
+def parse_reset(line, now=None):
+    # "Oct 9th, 2026 4:16 AM" or "4:10 AM" (today, or tomorrow if already past).
+    # None when the wording is unknown or the time is not in the future.
+    now = now or time.time()
+    match = AGAIN.search(line)
+    if not match:
+        return None
+    when = re.sub(r'(\d)(st|nd|rd|th),', r'\1,', ' '.join(match.group(1).split()))
+    for fmt in ('%b %d, %Y %I:%M %p', '%I:%M %p'):
+        try:
+            parsed = datetime.datetime.strptime(when, fmt)
+        except ValueError:
+            continue
+        if fmt == '%I:%M %p':
+            parsed = datetime.datetime.fromtimestamp(now).replace(
+                hour=parsed.hour, minute=parsed.minute, second=0, microsecond=0)
+            if parsed.timestamp() <= now:
+                parsed += datetime.timedelta(days=1)
+        return parsed.timestamp() if parsed.timestamp() > now else None
+    return None
 
 def load_state():
     try:
@@ -194,7 +221,11 @@ def reset_epoch(home):
                     continue
                 try:
                     limits = json.loads(line)['payload']['rate_limits']
-                    windows = [w for w in (limits.get('primary'), limits.get('secondary')) if w]
+                    # Skip windows that already reset: that snapshot predates the limit.
+                    windows = [w for w in (limits.get('primary'), limits.get('secondary'))
+                               if w and float(w['resets_at']) > time.time()]
+                    if not windows:
+                        continue
                     return float(max(windows, key=lambda w: w['used_percent'])['resets_at'])
                 except (ValueError, KeyError, TypeError):
                     continue
@@ -213,10 +244,12 @@ for home in homes or [None]:
         break
     with (run / 'run.log').open('rb') as stream:
         stream.seek(start)
-        if not LIMIT.search(stream.read()):
-            exhausted.pop(home, None)
-            break
-    exhausted[home] = reset_epoch(os.environ['CODEX_HOME'])
+        hit = LIMIT.search(stream.read())
+    if not hit:
+        exhausted.pop(home, None)
+        break
+    exhausted[home] = (parse_reset(hit.group().decode(errors='replace'))
+                       or reset_epoch(os.environ['CODEX_HOME']))
     until = time.strftime('%m-%d %H:%M', time.localtime(exhausted[home]))
     print(f'delegate: {home} out of quota until {until}', file=sys.stderr)
 if homes:

@@ -88,4 +88,23 @@ echo $((now + 600)) > "$tmp/b/limited"; echo $((now + 300)) > "$tmp/a/limited"; 
 "$root/bin/delegate" run "$tmp/prompt.md" --dir "$target" > /dev/null 2>&1 || true
 "$root/bin/delegate" run "$tmp/prompt.md" --dir "$target" > /dev/null 2>&1 || true
 [[ $(tr '\n' ' ' < "$tmp/order") == "b a a b " ]]
-printf 'PASS: summary cap, log isolation, check failure/tail, exclude, timeout, codex account rotation\n'
+# Reset time comes from the error line itself (both seen wordings); a rollout whose
+# windows already reset is ignored and falls through to the +1h guess.
+python3 - "$root/bin/delegate" "$tmp/stale" <<'PY'
+import datetime, json, os, re, sys, time
+from pathlib import Path
+source = Path(sys.argv[1]).read_text()
+exec(source[source.index('AGAIN = re.compile'):source.index('\nif homes:')])
+now = datetime.datetime(2026, 10, 10, 3, 20).timestamp()
+at = lambda *a: datetime.datetime(*a).timestamp()
+assert parse_reset('ERROR: You’ve hit your usage limit. ... try again at 4:10 AM.', now) == at(2026, 10, 10, 4, 10)
+assert parse_reset('ERROR: ... try again at 2:05 AM.', now) == at(2026, 10, 11, 2, 5)
+assert parse_reset('ERROR: ... try again at Oct 11th, 2026 4:16 PM.', now) == at(2026, 10, 11, 16, 16)
+assert parse_reset('ERROR: ... try again at Oct 9th, 2026 4:16 AM.', now) is None
+assert parse_reset('ERROR: You’ve hit your usage limit.', now) is None
+day = Path(sys.argv[2], 'sessions', time.strftime('%Y/%m/%d')); day.mkdir(parents=True)
+(day / 'rollout-x.jsonl').write_text(json.dumps({'payload': {'rate_limits': {
+    'primary': {'used_percent': 99.0, 'resets_at': time.time() - 60}}}}) + '\n')
+assert abs(reset_epoch(sys.argv[2]) - (time.time() + 3600)) < 5
+PY
+printf 'PASS: summary cap, log isolation, check failure/tail, exclude, timeout, codex account rotation, reset parsing\n'
