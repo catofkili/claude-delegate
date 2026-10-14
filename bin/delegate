@@ -67,7 +67,8 @@ export DELEGATE_OUT="$run/out.md"
 
 case $agent in
     codex)
-        cmd=("${DELEGATE_CODEX_BIN:-codex}" exec -C "$dir" -s workspace-write -o "$DELEGATE_OUT")
+        # DELEGATE_CODEX_SANDBOX=danger-full-access：只给必须起浏览器 / 模拟器的任务（macOS 沙箱会拦 Chrome 的 bootstrap_check_in）
+        cmd=("${DELEGATE_CODEX_BIN:-codex}" exec -C "$dir" -s "${DELEGATE_CODEX_SANDBOX:-workspace-write}" -o "$DELEGATE_OUT")
         [[ $in_git == true ]] || cmd+=(--skip-git-repo-check)
         [[ -z ${DELEGATE_CODEX_MODEL:-} ]] || cmd+=(-m "$DELEGATE_CODEX_MODEL")
         [[ -z ${DELEGATE_CODEX_EFFORT:-} ]] || cmd+=(-c "model_reasoning_effort=$DELEGATE_CODEX_EFFORT")
