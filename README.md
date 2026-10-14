@@ -99,7 +99,7 @@ export DELEGATE_CODEX_EFFORT='low'
 delegate run prompt.md --agent codex --check 'python3 -m unittest'
 ```
 
-Without these overrides, the installed CLI's configured model and effort apply; the runner does not assume that model is cheap. It uses `workspace-write` and disables networking for worker commands. If the task needs network access, explicitly set `DELEGATE_CODEX_NETWORK=1`. The model service itself still requires a network connection. [Codex execution](https://developers.openai.com/codex/noninteractive).
+Without these overrides, the installed CLI's configured model and effort apply; the runner does not assume that model is cheap. It uses `workspace-write` and disables networking for worker commands. If the task needs network access, explicitly set `DELEGATE_CODEX_NETWORK=1`. To let the worker write outside `--dir` (for example a symlinked `node_modules` where Vite keeps its cache), list the directories in `DELEGATE_CODEX_ADD_DIRS` (space separated); each becomes a Codex `--add-dir`. The model service itself still requires a network connection. [Codex execution](https://developers.openai.com/codex/noninteractive).
 
 `codex` must be on `PATH`, or set `DELEGATE_CODEX_BIN` to its full path (for example the copy bundled inside a desktop app).
 

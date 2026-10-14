@@ -76,6 +76,8 @@ case $agent in
         else
             cmd+=(-c sandbox_workspace_write.network_access=false)
         fi
+        # 额外可写目录（空格分隔），例如 worktree 里软链到主目录的 node_modules（vite 要写 .vite 缓存）
+        for extra in ${DELEGATE_CODEX_ADD_DIRS:-}; do cmd+=(--add-dir "$extra"); done
         cmd+=(-) ;;
     claude-compat)
         [[ -n ${DELEGATE_COMPAT_BASE_URL:-} && -n ${DELEGATE_COMPAT_MODEL:-} ]] || fail 'set DELEGATE_COMPAT_BASE_URL and DELEGATE_COMPAT_MODEL'
