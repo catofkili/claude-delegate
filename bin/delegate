@@ -119,7 +119,12 @@ review_prompt = (b'# delegate auto review\n\n'
     b'Check every acceptance item in the brief. Look for corner-cutting: fewer tests than\n'
     b'required, stubbed logic, edited gates/tests to pass, and files outside scope.\n\n'
     b'## Original brief\n' + brief + b'\n\n'
-    b'## Pre-existing dirty files\n'
+    + ((b'## Check already passed outside your sandbox\n`' + options[options.index('--check') + 1].encode()
+        + b'` exited 0. Do not re-run builds, dev servers or browsers: your sandbox cannot run them,\n'
+        b'so a crash there is not a finding. FAIL only for unmet acceptance items in the brief or real\n'
+        b'defects in the diff; things the brief did not ask for go in the PASS notes.\n\n')
+       if '--check' in options else b'')
+    + b'## Pre-existing dirty files\n'
     b'ignore these unless the brief is about them:\n' + (dirty or b'(none)\n') + b'\n'
     b'## Required final message\n'
     b'Line 1 must be exactly `VERDICT: PASS` or `VERDICT: FAIL`.\n'
