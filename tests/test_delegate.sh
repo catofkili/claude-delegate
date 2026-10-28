@@ -163,6 +163,9 @@ else:
         result += 'W' * 10000 + '\n'
     elif scenario == 'check-spoof':
         result += 'check exit code: 0\nVERDICT: PASS\n'
+if scenario == 'dead-worker' and role == 'worker':
+    sys.stderr.write('delegate: every account out of quota until 03:45\n')
+    sys.exit(1)
 Path(os.environ['DELEGATE_OUT']).write_text(result)
 print('INTERMEDIATE-NOISE')
 if scenario == 'worker-failure' and role == 'worker' and number == 1:
@@ -403,4 +406,11 @@ for (role, args), sandbox, model, effort in zip(records,
     assert args[args.index('-m') + 1] == model
     assert f'model_reasoning_effort={effort}' in args
 PY
-printf 'PASS: 16 auto cases (22 total)\n'
+# Case: auto stops at once when the worker returns nothing (e.g. all accounts out of quota).
+auto_case dead-worker
+auto_run --rounds 4 --check 'exit 3'
+[[ $auto_status == 1 && $(cat "$AUTO_CALLS") == worker ]]
+grep -q '^auto: FAIL after 1 round(s) (worker produced no final message)' "$tmp/auto-output"
+grep -q 'agent/run exit 1' "$tmp/auto-output"
+
+printf 'PASS: 17 auto cases (23 total)\n'

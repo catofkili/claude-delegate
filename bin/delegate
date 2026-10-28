@@ -132,6 +132,7 @@ review_prompt = (b'# delegate auto review\n\n'
     b'On PASS, list at most 5 spots most worth a human glance.\n')
 reason = b''
 last_review = None
+worker_err = b''
 passed = False
 for number in range(1, int(rounds) + 1):
     contents = brief
@@ -141,6 +142,12 @@ for number in range(1, int(rounds) + 1):
                      b'fix them in place, do not start over.\n')
     status, output = invoke(f'round-{number}', contents, options)
     message, check_status, check_tail = sections(output)
+    if status != 0 and not message.strip():
+        # Nothing came back (every account out of quota, agent crashed): more rounds fail the same way.
+        failure = 'worker produced no final message'
+        worker_err = (task / f'round-{number}.err').read_bytes()[-600:]
+        last_review = None
+        break
     green = check_status == b'0' or (check_given == 'false' and status == 0)
     if not green:
         failure = (f'check exit code: {check_status.decode()}' if check_status not in (None, b'not run')
@@ -165,6 +172,8 @@ detail = b'' if passed else b' (' + ' '.join(failure.split()).encode()[:160] + b
 header = (f'auto: {result} after {number} round(s)'.encode() + detail
           + f'; files: .delegate/{task.name}/\n'.encode())
 review_report = b'\nreview:\n' + last_review[:2000] + b'\n' if last_review is not None else b''
+if worker_err:
+    review_report = b'\nworker stderr (tail):\n' + worker_err
 # Preserve short run reports verbatim; full reports remain on disk when the budget is exceeded.
 budget = 4096 - len(header) - len(review_report)
 if len(output) > budget:
