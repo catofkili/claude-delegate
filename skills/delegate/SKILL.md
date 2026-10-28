@@ -1,6 +1,6 @@
 ---
 name: delegate
-description: Hand implementation, exploration and research work to a cheaper external agent (Codex/GPT, Gemini, or a Chinese model behind an Anthropic-compatible endpoint) while Claude stays the supervisor, with the fewest Claude turns possible. Use when the user wants to save Claude quota, says "delegate", "hand it to codex/gpt/luna/sol", "let the cheap model do it", or when a task needs lots of code written or many files read.
+description: Hand implementation, exploration and research work to a cheaper external agent (Codex/GPT, Gemini, or a Chinese model behind an Anthropic-compatible endpoint) while Claude stays the supervisor, with the fewest Claude turns possible. Use when the user wants to save Claude quota, says "delegate", "hand it to codex/gpt/luna/sol", "let the cheap model do it", when a task needs lots of code written or many files read, or by default whenever the external agent's quota is plentiful.
 ---
 
 # Delegate: Claude supervises, a cheaper agent does the work
@@ -33,6 +33,16 @@ Don't delegate:
 - Small edits where the brief would be longer than the diff.
 - **Judgment**: architecture decisions, final review, "is this done and correct". The worker locates facts and implements; Claude decides and referees. Never let the worker grade its own output.
 
+### When the worker's quota is plentiful (it's free, or far from its limit)
+
+Then the only scarce thing is Claude's turns and context. Shift the line hard toward the worker:
+
+- **Delegate anything bigger than a one-file tweak**, including the doc updates and progress notes that come with the change. Claude keeps only: choosing the task, the judgment calls written into the brief, and the final yes/no.
+- **Don't read code to write the brief.** Write goal, scope, acceptance, and the judgment calls you already know (from memory, docs, the user). List your assumptions under "verify first; if one is false, stop and report" and let the worker do the reading. A wrong premise then costs one cheap worker run, not your context.
+- **Use `delegate auto`, not `delegate run`** (below). Fix rounds and the first review pass happen between workers, not in your turns.
+- **Run independent tasks in parallel**, each in its own git worktree when they build or test in the same project, so outputs (`dist/`, caches) don't collide.
+- Use the strongest effort setting that doesn't hit the worker's limits; a stronger worker means fewer rejected rounds.
+
 ## The 3-turn protocol
 
 1. **Brief** (one Write). Write `prompt.md` with:
@@ -47,6 +57,16 @@ Don't delegate:
 3. **Verify** (that same call's output, or one more call). `delegate` prints only the capped summary, `git status --short`, and the tail of the check command. Then:
    - check: green → review `git diff --stat`, open only the hunks that look suspicious, commit yourself.
    - check: red → send one follow-up brief with the failing output, or fix it yourself if it's tiny.
+
+### Hands-off variant: `delegate auto` (default when the worker's quota is plentiful)
+
+```
+DELEGATE_REVIEW_MODEL=<strong model> delegate auto prompt.md --dir <worktree> --check '<acceptance>' [--rounds 3]
+```
+
+Worker run → check red? feed the failing tail back and rerun → green → a **fresh, read-only reviewer** (ideally a different model from the worker) runs `git diff` itself against the brief and answers `VERDICT: PASS|FAIL` + ≤ 12 `path:line — problem` lines → FAIL? feed the findings back and rerun. You get one final block: the verdict, the last worker summary, the review.
+
+Your verify step then shrinks to: `auto: PASS` + `git diff --stat` has no out-of-scope files → read only the ≤ 5 lines the reviewer flagged (~20 lines each), then commit. `auto: FAIL` after all rounds → the task or the brief is wrong; decide yourself (rewrite the brief, split it, or do the hard part). The reviewer is a filter that tells you where to look, not the referee: the final call is still yours.
 
 Batch: several small tasks go into **one** brief and one run, not several round trips. If two parallel tasks touch the same interface, write the interface (export names, signatures) into both briefs so neither waits on the other.
 

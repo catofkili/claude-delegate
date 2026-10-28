@@ -89,6 +89,20 @@ agent 的 stdout、stderr 都进入 `run.log`；执行器自己的错误进入 s
 
 限长约束的是总监收到的输出，不限制磁盘日志大小。执行者仍须遵守报告格式。字节截断可能切断 UTF-8 字符或遗漏重要问题，仍需验收和人工审查。`--check` 使用调用者的本地权限，在执行者沙箱外运行。prompt 和日志可能包含敏感资料，Git 排除规则不等于保密或数据传输控制。
 
+## 自动修复与审查
+
+```bash
+delegate auto prompt.md --dir ./worktree --check 'python3 -m unittest' --rounds 3
+DELEGATE_REVIEW_MODEL='your-review-model' DELEGATE_REVIEW_EFFORT='high' \
+  delegate auto prompt.md --dir ./worktree --check 'python3 -m unittest'
+```
+
+`delegate auto` 循环调用 `run`，检查通过后，再让审查者只读核对全部验收项和实际工作树。检查失败、审查否决或缺少审查结论时，把问题交回下一轮执行者，在原有改动上修复。`--rounds N` 限制**执行者运行次数**，默认 3；`--no-review` 表示检查通过就结束。不传 `--check` 时，以执行者退出码 0 为通过。所有 `run` 参数逐轮传给执行者；每次审查也单独沿用 `--timeout`。
+
+审查者使用相同 agent 和目录，不执行检查，报告上限 3000 字节。Codex 审查沙箱强制为 `read-only`；`DELEGATE_REVIEW_MODEL` / `DELEGATE_REVIEW_EFFORT` 可覆盖执行者的模型和 effort，否则保留原设置或未设置状态。需要跨模型审查时，请指定另一模型。其他后端收到只读指令和环境变量，但权限须由各自包装器落实。启动时保存已有脏文件清单，要求审查者忽略这些改动，除非 brief 涉及它们。
+
+stdout 只返回最终结论、最后一轮执行报告和最多 2000 字节的审查报告，总计不超过 4096 字节；过长的执行报告会在这里截断。各轮完整 prompt、stdout、stderr 和初始状态保存在 `.delegate/auto-<UTC时间戳>-<唯一后缀>/`。每次只解析自己的输出，同目录并行运行不会串用结论；执行者仍共享该工作树。退出码：**0** 通过、**1** 用尽执行轮数后失败、**2** 用法错误。
+
 ## 选择执行后端
 
 ### Codex

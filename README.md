@@ -89,6 +89,20 @@ Agent stdout and stderr go to `run.log`. Errors from the runner go to stderr. Ag
 
 Caps bound supervisor output, not disk usage. The worker must still obey the report format. A byte cap may cut a UTF-8 character or omit a relevant issue; acceptance checks and human review remain necessary. `--check` runs locally with the caller's permissions, outside the worker's sandbox. Prompts and logs may contain sensitive material: Git exclusion is not a secrecy or data-transfer control.
 
+## Automatic retries and review
+
+```bash
+delegate auto prompt.md --dir ./worktree --check 'python3 -m unittest' --rounds 3
+DELEGATE_REVIEW_MODEL='your-review-model' DELEGATE_REVIEW_EFFORT='high' \
+  delegate auto prompt.md --dir ./worktree --check 'python3 -m unittest'
+```
+
+`delegate auto` calls `run` until the check passes, then requests a read-only cross-review of every acceptance item and the actual working tree. A failed check, blocking review, or missing review verdict feeds the findings back to the next worker, which fixes its existing changes in place. `--rounds N` limits **worker runs** (default 3); `--no-review` passes as soon as the check is green. Without `--check`, a zero worker exit is green. All `run` options apply to every worker; `--timeout` also applies separately to each review.
+
+The reviewer uses the same agent and directory, no check, and a 3000-byte summary. For Codex, its sandbox is forced to `read-only`; `DELEGATE_REVIEW_MODEL` / `DELEGATE_REVIEW_EFFORT` override the worker's model/effort, otherwise those settings stay inherited or unset. Choose a different review model for cross-model review. Other backends receive the read-only instruction and environment, but their wrappers must enforce permissions. The initial dirty-file list tells the reviewer to ignore pre-existing changes unless the brief concerns them.
+
+Only the final verdict, last worker report and up to 2000 review bytes reach stdout, capped at 4096 bytes; long worker reports are truncated there. Full round/review prompts, stdout, stderr and the initial status are retained in `.delegate/auto-<UTC-timestamp>-<unique-suffix>/`. Each invocation reads its own captured reports, so parallel tasks in the same directory keep separate verdicts; their workers still share that working tree. Exit codes are **0** (PASS), **1** (FAIL after the worker budget), and **2** (usage error).
+
 ## Choose a backend
 
 ### Codex
