@@ -257,6 +257,7 @@ PY
     *) fail "unknown agent: $agent" ;;
 esac
 
+export DELEGATE_CARD_TOOL=${DELEGATE_CARD_TOOL-$(cd "$(dirname "$(readlink -f "$0")")/../tools" && pwd)/codex-reset-card.py}
 exec python3 - "$dir" "$run" "$agent" "$check" "$max_summary" "$timeout" "$in_git" "$run_started" "${cmd[@]}" <<'PY'
 import collections
 import datetime
@@ -378,6 +379,13 @@ def reset_epoch(home):
 if homes:
     exhausted = {h: e for h, e in load_state().items() if e > time.time()}
     homes.sort(key=lambda h: exhausted.get(h, 0))
+# Reset cards: the user's rule (2026-10-14) was to spend one on its own when the weekly
+# quota runs out a day or more before it refreshes. Until 2026-11-09 it lived only in a
+# shushugo memory note, so sessions saw "out of quota until ..." and stopped; now the
+# tool decides (rules in its docstring) and the same account reruns. One card per
+# account per run, so a card that does not help cannot burn the next one.
+CARD = Path(os.environ.get('DELEGATE_CARD_TOOL', ''))
+carded = set()
 for home in homes or [None]:
     if home:
         os.environ['CODEX_HOME'] = os.path.expanduser(home)
@@ -396,6 +404,12 @@ for home in homes or [None]:
                        or reset_epoch(os.environ['CODEX_HOME']))
     until = time.strftime('%m-%d %H:%M', time.localtime(exhausted[home]))
     print(f'delegate: {home} out of quota until {until}', file=sys.stderr)
+    if CARD.is_file() and home not in carded:
+        carded.add(home)
+        if subprocess.run([sys.executable, str(CARD), 'auto', os.environ['CODEX_HOME'], '--hit'],
+                          stdout=sys.stderr).returncode == 0:
+            exhausted.pop(home, None)
+            homes.insert(homes.index(home) + 1, home)
 if homes:
     state.write_text(' '.join(f'{h}={int(e)}' for h, e in exhausted.items()) + '\n')
 os.environ.pop('DELEGATE_COMPAT_SECRET', None)

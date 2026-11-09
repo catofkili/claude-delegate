@@ -128,6 +128,8 @@ export DELEGATE_CODEX_HOMES="$HOME/.codex $HOME/.codex-b"
 
 When a run's log shows Codex's usage-limit error, the runner reads that account's reset time from the `rate_limits` snapshot Codex writes into `CODEX_HOME/sessions/`, records it, and reruns the same prompt on the next account (the rerun starts fresh on whatever the first attempt already changed). The memory is a single line in `~/.delegate-codex-state` (override with `DELEGATE_CODEX_STATE`), `home=reset_epoch` per exhausted account. Each run tries ready accounts first in your order, then exhausted ones by soonest reset, so the account that refreshes first is the one in use. Check your plan's terms on multiple accounts before relying on this.
 
+**Reset cards.** Before moving on to the next account, the runner calls `tools/codex-reset-card.py auto <CODEX_HOME> --hit` once per account per run. It spends that account's earliest-expiring reset card only when the weekly quota is used up and refreshes 24 h or more away, or when the 5-hour quota is used up for more than 2 more hours while the weekly quota has under 10% left; if it spends one, the same account reruns. When an access token in `auth.json` has expired (Codex only refreshes it while running), the tool refreshes it with the refresh token, as the Codex CLI does. Set `DELEGATE_CARD_TOOL=` (empty) to turn this off. `codex-reset-card.py status <CODEX_HOME>` lists the cards left.
+
 ### Anthropic-compatible provider through Claude Code
 
 This example uses the [dated DeepSeek integration](MODELS.md); choose a documented endpoint, model and matching key for your provider:

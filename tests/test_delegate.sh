@@ -63,6 +63,8 @@ set +e
 status=$?
 set -e
 [[ $status == 124 ]]
+# Tests must never reach the real reset-card API.
+export DELEGATE_CARD_TOOL=
 # Case: Codex rotation from exhausted "a" to "b", then start on "b".
 cat > "$tmp/fake-codex" <<'AGENT'
 #!/usr/bin/env bash
@@ -90,6 +92,13 @@ echo $((now + 600)) > "$tmp/b/limited"; echo $((now + 300)) > "$tmp/a/limited"; 
 "$root/bin/delegate" run "$tmp/prompt.md" --dir "$target" > /dev/null 2>&1 || true
 "$root/bin/delegate" run "$tmp/prompt.md" --dir "$target" > /dev/null 2>&1 || true
 [[ $(tr '\n' ' ' < "$tmp/order") == "b a a b " ]]
+# Case: a reset card is spent on the exhausted account and the same account reruns;
+# one card per account per run.
+printf '#!/usr/bin/env python3\nimport os,sys\nopen(os.environ["CARDS"],"a").write(os.path.basename(sys.argv[2])+"\\n")\nos.remove(sys.argv[2]+"/limited")\n' > "$tmp/fake-card"
+echo $((now + 600)) > "$tmp/b/limited"; echo $((now + 300)) > "$tmp/a/limited"; : > "$ORDER"; : > "$tmp/state"
+CARDS="$tmp/cards" DELEGATE_CARD_TOOL="$tmp/fake-card" "$root/bin/delegate" run "$tmp/prompt.md" --dir "$target" > "$tmp/card" 2>/dev/null
+grep -q ROTATED-OK "$tmp/card"
+[[ $(tr '\n' ' ' < "$ORDER") == "a a " && $(cat "$tmp/cards") == a && $(cat "$tmp/state") == "" ]]
 # Case: reset time comes from the error line itself (both seen wordings); a rollout whose
 # windows already reset is ignored and falls through to the +1h guess.
 python3 - "$root/bin/delegate" "$tmp/stale" <<'PY'
